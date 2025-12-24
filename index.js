@@ -5,7 +5,7 @@ const session = require('express-session');
 
 const app = express();
 // Render automatically PORT assign karta hai
-const PORT = process.env.PORT || 10000; 
+const PORT = process.env.PORT ||50036; 
 
 const ADMIN_USER = "admin";
 const ADMIN_PASS = "adiiw123";
