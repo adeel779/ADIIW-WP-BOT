@@ -6,7 +6,7 @@ const session = require('express-session');
 const app = express();
 const PORT = process.env.PORT || 20014;
 
-// --- SETTINGS (WAPIS ADDED) ---
+// --- SETTINGS ---
 const ADMIN_USER = "admin";
 const ADMIN_PASS = "adiiw123";
 const BG_IMAGE = "https://i.ibb.co/LhqW4Kkp/24c74c75181047d7237a598283849ec3.jpg";
@@ -17,17 +17,20 @@ app.use(session({ secret: 'adiiw-ultra-key', resave: false, saveUninitialized: t
 let connectionStatus = "OFFLINE";
 let taskInterval = null;
 
-// ================= STABLE WHATSAPP ENGINE =================
+// ================= STABLE WHATSAPP ENGINE (FIXED FOR CLOUD) =================
 const client = new Client({
     authStrategy: new LocalAuth(),
     puppeteer: {
         headless: true,
+        // YE LINE ZAROORI HAI KOYEB KE LIYE
+        executablePath: '/usr/bin/google-chrome-stable', 
         args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
             '--disable-dev-shm-usage',
             '--no-zygote',
-            '--single-process'
+            '--single-process',
+            '--disable-gpu'
         ],
     }
 });
@@ -37,9 +40,13 @@ client.on('ready', () => {
     console.log('Bot is Ready!'); 
 });
 
+// Authentication fail hone par status update
+client.on('auth_failure', () => { connectionStatus = "OFFLINE"; });
+client.on('disconnected', () => { connectionStatus = "OFFLINE"; });
+
 client.initialize().catch(e => console.log("Init Error: ", e.message));
 
-// ================= UI (BG IMAGE RESTORED) =================
+// ================= UI CODE =================
 const loginUI = `<!DOCTYPE html><html><head><title>ADIIW LOGIN</title><style>
 body{margin:0;height:100vh;display:flex;align-items:center;justify-content:center;background:url("${BG_IMAGE}") center/cover fixed;font-family:sans-serif;}
 .card{background:rgba(0,0,0,0.7);backdrop-filter:blur(10px);padding:40px;border-radius:20px;text-align:center;color:white;border:1px solid rgba(255,255,255,0.1);}
@@ -118,7 +125,7 @@ wss.on("connection", ws => {
             try {
                 const code = await client.requestPairingCode(data.phone);
                 ws.send(JSON.stringify({type:'pair_code', code: code}));
-            } catch(e) { ws.send(JSON.stringify({type:'log', msg: "Wait 15s for engine to start..."})); }
+            } catch(e) { ws.send(JSON.stringify({type:'log', msg: "Engine Starting... Wait 20s"})); }
         }
         if(data.type === 'check_status') ws.send(JSON.stringify({type:'status', msg: connectionStatus}));
         if(data.type === 'stop') { if(taskInterval) { clearInterval(taskInterval); taskInterval = null; } }
@@ -136,4 +143,3 @@ wss.on("connection", ws => {
         }
     });
 });
-
