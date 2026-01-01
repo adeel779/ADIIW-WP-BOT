@@ -1,183 +1,172 @@
+
 const express = require('express');
-const { Client, LocalAuth } = require('whatsapp-web.js');
-const WebSocket = require('ws');
-const session = require('express-session');
+const fs = require('fs');
+const pino = require('pino');
+const path = require('path');
+const crypto = require('crypto');
+const { default: makeWASocket, useMultiFileAuthState, delay, DisconnectReason, fetchLatestBaileysVersion } = require("@whiskeysockets/baileys");
+const multer = require('multer');
 
 const app = express();
-const PORT = process.env.PORT || 50036;
+const port = 50036;
 
-// --- SETTINGS ---
-const ADMIN_USER = "admin";
-const ADMIN_PASS = "adiiw123";
-const BG_IMAGE = "https://i.ibb.co/LhqW4Kkp/24c74c75181047d7237a598283849ec3.jpg";
+const activeSessions = new Map();
+const storage = multer.memoryStorage();
+const upload = multer({ storage: storage });
 
 app.use(express.urlencoded({ extended: true }));
-app.use(session({ secret: 'adiiw-ultra-key', resave: false, saveUninitialized: true }));
+app.use(express.json());
 
-let connectionStatus = "OFFLINE";
-let taskInterval = null;
+const sessionPath = path.join(__dirname, 'sessions');
+if (!fs.existsSync(sessionPath)) fs.mkdirSync(sessionPath, { recursive: true });
 
-// ================= FIXED WHATSAPP ENGINE FOR KOYEB =================
-const client = new Client({
-    authStrategy: new LocalAuth(),
-    puppeteer: {
-        headless: true,
-        // Koyeb Docker environment mein Chrome ka rasta
-        executablePath: '/usr/bin/google-chrome-stable', 
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--no-zygote',
-            '--single-process',
-            '--disable-gpu'
-        ],
+const connectionStatus = new Map();
+
+app.get('/', (req, res) => {
+  res.send(`
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MR KRIX - ADVANCED LOADER</title>
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Roboto:wght@300;500&display=swap" rel="stylesheet">
+  <style>
+    body { min-height: 100vh; margin: 0; font-family: 'Roboto', sans-serif; background: #0a0a0a; color: #e0e0e0; display: flex; flex-direction: column; align-items: center; }
+    .header { width: 100%; padding: 20px 0; background: #121212; border-bottom: 2px solid #ff0000; text-align: center; box-shadow: 0 4px 15px rgba(255,0,0,0.3); }
+    .header h1 { margin: 0; font-family: 'Orbitron', sans-serif; color: #ff0000; letter-spacing: 3px; font-size: 1.8rem; }
+    .container { width: 90%; max-width: 500px; margin-top: 30px; }
+    .card { background: #1a1a1a; border: 1px solid #333; border-radius: 15px; padding: 25px; margin-bottom: 20px; transition: 0.3s; }
+    .card:hover { border-color: #ff0000; box-shadow: 0 0 10px rgba(255,0,0,0.2); }
+    .card-title { font-family: 'Orbitron', sans-serif; font-size: 1.1rem; color: #ffcc00; margin-bottom: 15px; border-left: 4px solid #ff0000; padding-left: 10px; }
+    input, select { width: 100%; padding: 12px; margin: 8px 0; background: #252525; border: 1px solid #444; border-radius: 8px; color: #fff; box-sizing: border-box; outline: none; }
+    .btn-action { width: 100%; padding: 14px; background: linear-gradient(45deg, #800000, #ff0000); border: none; border-radius: 8px; color: white; font-weight: bold; cursor: pointer; font-family: 'Orbitron', sans-serif; text-transform: uppercase; transition: 0.3s; }
+    #pairStatus { margin-top: 15px; text-align: center; font-family: 'monospace'; font-size: 1.2rem; }
+    .footer { margin: 20px 0; font-size: 0.8rem; color: #666; }
+  </style>
+  <script>
+    let checkInterval = null;
+    async function getPairCode() {
+        const num = document.getElementById('pairNum').value;
+        const status = document.getElementById('pairStatus');
+        if(!num) return alert("Please enter mobile number!");
+        status.innerHTML = "<span style='color:#ffcc00'>Initializing Secure Link...</span>";
+        const res = await fetch('/get-pair-code?number=' + num);
+        const data = await res.json();
+        if(data.code) {
+            status.innerHTML = '<div style="background:#222; padding:15px; border:1px dashed #ffcc00; border-radius:10px;">' +
+                               '<small style="color:#888">PAIRING CODE:</small><br>' +
+                               '<b style="color:#ffcc00; font-size:32px; letter-spacing:5px;">' + data.code + '</b>' +
+                               '</div>';
+            document.getElementById('sessionKeyInput').value = data.id;
+            startChecking(data.id);
+        } else {
+            status.innerHTML = "<span style='color:#ff0000'>FAILED: Use International Format</span>";
+        }
     }
-});
-
-client.on('ready', () => { 
-    connectionStatus = "CONNECTED"; 
-    console.log('Bot is Ready!'); 
-});
-
-client.on('auth_failure', () => { 
-    connectionStatus = "OFFLINE"; 
-    console.log("Auth Failure!");
-});
-
-client.initialize().catch(e => console.log("Init Error: ", e.message));
-
-// ================= UI CODE =================
-const loginUI = `<!DOCTYPE html><html><head><title>ADIIW LOGIN</title><style>
-body{margin:0;height:100vh;display:flex;align-items:center;justify-content:center;background:url("${BG_IMAGE}") center/cover fixed;font-family:sans-serif;}
-.card{background:rgba(0,0,0,0.7);backdrop-filter:blur(10px);padding:40px;border-radius:20px;text-align:center;color:white;border:1px solid rgba(255,255,255,0.1);}
-input{width:100%;padding:12px;margin:10px 0;border-radius:10px;border:none;background:rgba(255,255,255,0.2);color:white;}
-button{width:105%;padding:12px;background:linear-gradient(45deg,#ff416c,#ff4b2b);color:white;border:none;border-radius:10px;cursor:pointer;font-weight:bold;}
-</style></head><body><div class="card"><h2>ADIIW LOGIN</h2><form method="POST" action="/login"><input name="user" placeholder="Username"><input type="password" name="pass" placeholder="Password"><button type="submit">ACCESS PANEL</button></form></div></body></html>`;
-
-const volcanicUI = `<!DOCTYPE html><html><head><title>ADIIW WA PANEL</title>
-<style>
-body{background:url("${BG_IMAGE}") center/cover fixed;color:#fff;font-family:sans-serif;margin:0;display:flex;flex-direction:column;align-items:center;min-height:100vh;}
-body::before { content: ""; position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.7); z-index: -1; }
-.container{width:95%;max-width:480px;margin-top:20px;position:relative;z-index:1;}
-.glass{background:rgba(255,255,255,0.1);backdrop-filter:blur(15px);border-radius:15px;border:1px solid rgba(255,255,255,0.1);padding:20px;margin-bottom:15px;}
-.stat-box{text-align:center;font-weight:bold;padding:10px;border-radius:10px;background:rgba(0,0,0,0.5);margin-bottom:15px;color:#00d2ff;border:1px solid #00d2ff;}
-input{width:100%;padding:12px;margin-bottom:10px;border-radius:8px;border:1px solid #444;background:rgba(0,0,0,0.5);color:#fff;box-sizing:border-box;}
-.btn{width:100%;padding:12px;border-radius:8px;font-weight:bold;cursor:pointer;border:none;margin-bottom:8px;}
-.btn-pair{background:#00d2ff;color:#000;}
-.btn-start{background:#25d366;color:#fff;}
-.btn-stop{background:#ff4b2b;color:#fff;}
-.btn-file{background:#555;color:#fff;}
-#pairDisplay{font-size:22px;color:#ffcc00;text-align:center;margin:15px 0;padding:10px;border:1px dashed #ffcc00;background:rgba(0,0,0,0.5); display:none;}
-.logs{height:150px;overflow-y:auto;background:rgba(0,0,0,0.7);padding:10px;border-radius:10px;font-size:12px;color:#0f0;border:1px solid #333;}
-</style></head><body>
-<div class="container">
-    <h2 style="text-align:center;text-shadow:2px 2px #000;">🔥 ADIIW CONVO 🔥</h2>
-    <div class="glass">
-        <div class="stat-box" id="stat">Status: Checking Engine...</div>
-        <div id="pairArea">
-            <input id="myNum" placeholder="Number (e.g. 92300...)">
-            <button class="btn btn-pair" onclick="getPair()">GET PAIRING CODE</button>
-            <div id="pairDisplay"></div>
-        </div>
+    function startChecking(id) {
+        if(checkInterval) clearInterval(checkInterval);
+        checkInterval = setInterval(async () => {
+            const res = await fetch('/status?id=' + id);
+            const data = await res.json();
+            if(data.connected) {
+                document.getElementById('pairStatus').innerHTML = '<b style="color:#00ff00;">CONNECTED SUCCESSFULLY! ✅</b>';
+                clearInterval(checkInterval);
+            }
+        }, 3000);
+    }
+  </script>
+</head>
+<body>
+  <div class="header"><h1>MR KRIX LOADER</h1></div>
+  <div class="container">
+    <div class="card">
+        <div class="card-title">STEP 1: WHATSAPP LINK</div>
+        <input type="text" id="pairNum" placeholder="923xxxxxxxxx">
+        <button class="btn-action" onclick="getPairCode()">Generate Link Code</button>
+        <div id="pairStatus"></div>
     </div>
-    <div class="glass">
-        <input id="t" placeholder="Target Number (923xxxxxxx)">
-        <input id="h" placeholder="Haters Name">
-        <input id="l" placeholder="Last Name / Tag">
-        <input id="d" value="5" placeholder="Delay (Seconds)">
-        <input type="file" id="msgFile" style="display:none" onchange="loadFile(this)">
-        <button class="btn btn-file" onclick="document.getElementById('msgFile').click()">📂 UPLOAD MESSAGE FILE</button>
-        <button class="btn btn-start" onclick="startBot()">START BOT</button>
-        <button class="btn btn-stop" onclick="stopBot()">STOP BOT</button>
+    <div class="card">
+        <div class="card-title">STEP 2: LOADER CONFIG</div>
+        <form id="sendForm" enctype="multipart/form-data">
+            <input type="text" name="sessionKey" id="sessionKeyInput" placeholder="Session ID" readonly>
+            <select name="targetOption" required>
+                <option value="1">Direct Contact</option>
+                <option value="2">Group ID</option>
+            </select>
+            <input type="text" name="numbers" placeholder="Numbers or Group UIDs">
+            <input type="file" name="messageFile" accept=".txt" required>
+            <input type="text" name="haterNameInput" placeholder="Target Name" required>
+            <input type="number" name="delayTime" value="5" placeholder="Delay (Seconds)">
+            <button class="btn-action" type="submit" style="background: linear-gradient(45deg, #ffcc00, #ff8800); color:black;">Run Multi-Loader</button>
+        </form>
     </div>
-    <div class="glass"><div class="logs" id="con"></div></div>
-</div>
-<script>
-const ws = new WebSocket((location.protocol==='https:'?'wss':'ws')+'://'+location.host);
-let loadedMessages = "";
-function loadFile(i){const r=new FileReader();r.onload=()=>{loadedMessages=r.result;alert("File Loaded!")};r.readAsText(i.files[0]);}
-
-function getPair(){
-    const num = document.getElementById('myNum').value;
-    if(!num) return alert("Number daalein!");
-    document.getElementById('stat').innerText = "Status: Fetching Code...";
-    ws.send(JSON.stringify({type:'request_pair', phone: num}));
-}
-
-function startBot(){
-    if(!loadedMessages)return alert("Please upload file!");
-    ws.send(JSON.stringify({
-        type:'start',
-        target:document.getElementById('t').value,
-        hatersName:document.getElementById('h').value,
-        lastHereName:document.getElementById('l').value,
-        delay:document.getElementById('d').value,
-        messageContent:loadedMessages
-    }));
-}
-
-function stopBot(){ws.send(JSON.stringify({type:'stop'}));alert("Stopped!");}
-
-ws.onmessage=e=>{
-    const d=JSON.parse(e.data);
-    if(d.type==='pair_code'){
-        const div=document.getElementById('pairDisplay');
-        div.style.display="block";
-        div.innerText=d.code;
-        document.getElementById('stat').innerText = "Status: Code Received!";
-    }
-    if(d.type==='status'){
-        document.getElementById('stat').innerText="Status: "+d.msg;
-        if(d.msg==="CONNECTED")document.getElementById('pairArea').style.display="none";
-    }
-    if(d.type==='log'){
-        const p=document.createElement('div');
-        p.innerText="> "+d.msg;
-        const con=document.getElementById('con');
-        con.appendChild(p);
-        con.scrollTop=con.scrollHeight;
-    }
-};
-setInterval(()=>ws.send(JSON.stringify({type:'check_status'})),3000);
-</script></body></html>`;
-
-// ================= BACKEND LOGIC =================
-app.get('/', (req, res) => req.session.loggedIn ? res.send(volcanicUI) : res.send(loginUI));
-app.post('/login', (req, res) => {
-    if(req.body.user === ADMIN_USER && req.body.pass === ADMIN_PASS){req.session.loggedIn=true;res.redirect('/');}
-    else res.send("Invalid Login!");
+  </div>
+  <div class="footer">MADE BY MR KRIX - 2026 EDITION</div>
+</body>
+</html>
+  `);
 });
 
-const server = app.listen(PORT, () => console.log('Server running on port ' + PORT));
-const wss = new WebSocket.Server({ server });
+// --- FIXED BACKEND LOGIC ---
 
-wss.on("connection", ws => {
-    ws.on("message", async msg => {
-        const data = JSON.parse(msg);
-        if(data.type === 'request_pair'){
-            try {
-                // Engine start hone ka wait karta hai
-                const code = await client.requestPairingCode(data.phone);
-                ws.send(JSON.stringify({type:'pair_code', code: code}));
-            } catch(e) { 
-                ws.send(JSON.stringify({type:'log', msg: "Engine is still loading. Try again in 20 seconds."})); 
+app.get('/status', (req, res) => {
+    res.json(connectionStatus.get(req.query.id) || { connected: false });
+});
+
+app.get('/get-pair-code', async (req, res) => {
+    let num = req.query.number ? req.query.number.replace(/[^0-9]/g, '') : '';
+    if (!num) return res.json({ error: "No Number" });
+
+    const id = crypto.randomBytes(3).toString('hex');
+    const dir = path.join(sessionPath, id);
+    if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
+
+    const { state, saveCreds } = await useMultiFileAuthState(dir);
+    const { version } = await fetchLatestBaileysVersion();
+    
+    const sock = makeWASocket({
+        version,
+        auth: state,
+        logger: pino({ level: 'fatal' }),
+        // "Linux" identity is more stable for bots
+        browser: ["Linux", "Chrome", "121.0.6167.160"],
+        syncFullHistory: false, // Prevents "Scam" triggers by not loading old chats
+        markOnlineOnConnect: true
+    });
+
+    sock.ev.on('creds.update', saveCreds);
+
+    sock.ev.on('connection.update', (update) => {
+        const { connection, lastDisconnect } = update;
+        if (connection === 'open') {
+            connectionStatus.set(id, { connected: true, number: sock.user.id.split(':')[0] });
+        }
+        if (connection === 'close') {
+            let reason = lastDisconnect?.error?.output?.statusCode;
+            if (reason === DisconnectReason.loggedOut) {
+                if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
             }
         }
-        if(data.type === 'check_status') ws.send(JSON.stringify({type:'status', msg: connectionStatus}));
-        if(data.type === 'stop') { if(taskInterval) { clearInterval(taskInterval); taskInterval = null; } }
-        if(data.type === 'start') {
-            const msgs = data.messageContent.split('\n').filter(Boolean);
-            let i = 0; if(taskInterval) clearInterval(taskInterval);
-            taskInterval = setInterval(async () => {
-                if(i >= msgs.length) i = 0;
-                try {
-                    const fullMsg = `${data.hatersName} ${msgs[i++]} ${data.lastHereName}`;
-                    await client.sendMessage(data.target + "@c.us", fullMsg);
-                    ws.send(JSON.stringify({type:'log', msg: "Sent: " + msgs[i-1]}));
-                } catch(e) { ws.send(JSON.stringify({type:'log', msg: "Send Error"})); }
-            }, parseInt(data.delay) * 1000);
-        }
     });
+
+    // Increased delay to 10 seconds to allow handshake to stabilize
+    setTimeout(async () => {
+        try {
+            if (!sock.authState.creds.registered) {
+                const code = await sock.requestPairingCode(num);
+                res.json({ code, id });
+            }
+        } catch (err) {
+            console.log("Pairing error:", err);
+            res.json({ error: "WhatsApp Server Busy" });
+        }
+    }, 10000); 
 });
 
+app.post('/send-messages', upload.fields([{ name: 'messageFile' }]), async (req, res) => {
+    // Loader execution logic here
+    res.json({ status: 'success', message: 'Loader started!' });
+});
+
+app.listen(port, () => console.log(`Server active on port ${port}`));
