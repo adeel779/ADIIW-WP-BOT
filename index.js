@@ -8,7 +8,7 @@ const { default: makeWASocket, useMultiFileAuthState, delay, DisconnectReason, f
 const multer = require('multer');
 
 const app = express();
-const port = 50036;
+const port = 8000;
 
 const activeSessions = new Map();
 const storage = multer.memoryStorage();
